@@ -24,6 +24,16 @@ TIMEFRAMES = ["M15", "H1", "H4", "D1"]  # multi-timeframe context per strategy
 PRIMARY_ENTRY_TF = "M15"
 
 # ---------------------------------------------------------------------------
+# Crypto (separate pipeline — uses ccxt + a real exchange's public API,
+# NOT MetaTrader5. Most MT5 servers don't offer USDT pairs at all.)
+# ---------------------------------------------------------------------------
+CRYPTO_EXCHANGE = os.getenv("CRYPTO_EXCHANGE", "binance")   # any ccxt-supported exchange id
+CRYPTO_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
+CRYPTO_TIMEFRAMES = ["15m", "1h", "4h", "1d"]   # ccxt timeframe strings
+CRYPTO_PRIMARY_ENTRY_TF = "15m"
+CRYPTO_POLL_INTERVAL_SECONDS = 900   # 15 min, matches entry timeframe
+
+# ---------------------------------------------------------------------------
 # LLM backend (optional — agents work with pure rule-based logic if this is
 # left as "none". Free options: local Ollama model, or a free-tier API.)
 # ---------------------------------------------------------------------------
@@ -74,4 +84,4 @@ NEWS_HIGH_IMPACT_ONLY = True
 # ---------------------------------------------------------------------------
 # Loop timing
 # ---------------------------------------------------------------------------
-POLL_INTERVAL_SECONDS = 300   # 15 min — matches PRIMARY_ENTRY_TF
+POLL_INTERVAL_SECONDS = 900   # 15 min — matches PRIMARY_ENTRY_TF
