@@ -19,8 +19,8 @@ MT5_TERMINAL_PATH = os.getenv("MT5_TERMINAL_PATH", "")  # optional, auto-detect 
 # ---------------------------------------------------------------------------
 # Symbols & timeframes
 # ---------------------------------------------------------------------------
-SYMBOLS = ["EURUSD","USDCHF"]
-TIMEFRAMES = ["M15", "H1", "H4", "D1"]  # multi-timeframe context per agent
+SYMBOLS = ["EURUSD", "GBPUSD"]   # forex-only focus, two most liquid pairs
+TIMEFRAMES = ["M15", "H1", "H4", "D1"]  # multi-timeframe context per strategy
 PRIMARY_ENTRY_TF = "M15"
 
 # ---------------------------------------------------------------------------
@@ -62,8 +62,16 @@ NEWS_BLACKOUT_MINUTES = 15      # no new trades within N minutes of high-impact 
 # Database
 # ---------------------------------------------------------------------------
 DB_PATH = os.getenv("DB_PATH", "trading_journal.db")
+PREDICTIONS_DB_PATH = os.getenv("PREDICTIONS_DB_PATH", "predictions.db")
+
+# ---------------------------------------------------------------------------
+# News calendar (real feed — public, free, no API key required)
+# ---------------------------------------------------------------------------
+NEWS_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+NEWS_KEYWORDS = ["Non-Farm", "NFP", "CPI", "FOMC", "Interest Rate", "GDP"]
+NEWS_HIGH_IMPACT_ONLY = True
 
 # ---------------------------------------------------------------------------
 # Loop timing
 # ---------------------------------------------------------------------------
-POLL_INTERVAL_SECONDS = 900 
+POLL_INTERVAL_SECONDS = 300   # 15 min — matches PRIMARY_ENTRY_TF

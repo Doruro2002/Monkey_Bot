@@ -75,3 +75,63 @@ def volatility_regime(df: pd.DataFrame) -> str:
     if current_atr < avg_atr * 0.7:
         return "low"
     return "normal"
+
+
+def support_resistance_levels(df: pd.DataFrame, lookback: int = 3, n_levels: int = 3) -> dict:
+    """Returns the strongest nearby support and resistance levels, derived
+    from recent confirmed swing points."""
+    highs, lows = swing_points(df, lookback)
+    last_close = df["close"].iloc[-1]
+
+    resistances = sorted([h[1] for h in highs if h[1] > last_close])[:n_levels]
+    supports = sorted([l[1] for l in lows if l[1] < last_close], reverse=True)[:n_levels]
+
+    return {
+        "nearest_resistance": resistances[0] if resistances else None,
+        "nearest_support": supports[0] if supports else None,
+    }
+
+
+def is_ranging(df: pd.DataFrame, lookback: int = 30, threshold_atr_multiples: float = 3.0) -> bool:
+    """Rough range detector: if price has stayed within a band narrower than
+    N average-ATR-widths over the lookback window, treat it as ranging
+    rather than trending."""
+    recent = df.iloc[-lookback:]
+    band_width = recent["high"].max() - recent["low"].min()
+    avg_atr = atr(df).iloc[-lookback:].mean()
+    if avg_atr == 0 or pd.isna(avg_atr):
+        return False
+    return band_width < (avg_atr * threshold_atr_multiples)
+
+
+def range_bounds(df: pd.DataFrame, lookback: int = 30) -> dict:
+    recent = df.iloc[-lookback:]
+    return {"range_high": recent["high"].max(), "range_low": recent["low"].min()}
+
+
+def detect_breakout_retest(df: pd.DataFrame, lookback: int = 30, retest_tolerance_atr: float = 0.5) -> dict:
+    """
+    Looks for: price broke out of the recent range, and has since pulled
+    back close to the broken level (a retest) — the classic
+    breakout-and-retest entry pattern.
+    Returns {"pattern": "bullish_retest" | "bearish_retest" | "none",
+             "level": float | None}.
+    """
+    recent = df.iloc[-lookback:-1]  # exclude the very last (still-forming) bar
+    range_high = recent["high"].max()
+    range_low = recent["low"].min()
+    last_close = df["close"].iloc[-1]
+    atr_val = atr(df).iloc[-1]
+
+    if pd.isna(atr_val) or atr_val == 0:
+        return {"pattern": "none", "level": None}
+
+    broke_up = df["high"].iloc[-lookback:].max() > range_high
+    broke_down = df["low"].iloc[-lookback:].min() < range_low
+
+    if broke_up and abs(last_close - range_high) <= atr_val * retest_tolerance_atr and last_close >= range_high * 0.999:
+        return {"pattern": "bullish_retest", "level": range_high}
+    if broke_down and abs(last_close - range_low) <= atr_val * retest_tolerance_atr and last_close <= range_low * 1.001:
+        return {"pattern": "bearish_retest", "level": range_low}
+
+    return {"pattern": "none", "level": None}

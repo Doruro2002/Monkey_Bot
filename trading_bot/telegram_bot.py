@@ -42,6 +42,45 @@ def send_message(text: str, reply_markup: dict = None) -> dict:
     return resp.json()
 
 
+def format_predictions_report(symbol: str, predictions: list) -> str:
+    """The 'T' message — this cycle's fresh prediction from every strategy."""
+    lines = [f"📊 *{symbol}* — Predictions (now)\n"]
+
+    vote_emoji = {"BUY": "🟢", "SELL": "🔴"}
+
+    for r in predictions:
+        emoji = vote_emoji.get(r["vote"], "⚪")
+        lines.append(f"{emoji} *{r['name']}* ({r.get('strategy', '')})")
+        lines.append(f"   {r['vote']} — Confidence: *{r['confidence']}%*")
+        lines.append(f"   Entry: `{r['entry']}` | SL: `{r['sl']}` | TP1: `{r['tp1']}` | TP2: `{r['tp2']}`")
+        if r.get("reasons"):
+            reason_text = " ".join(r["reasons"]) if isinstance(r["reasons"], list) else str(r["reasons"])
+            lines.append(f"   Why: _{reason_text}_")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def format_review_report(symbol: str, reviews: list) -> str:
+    """The 'T-1' message — did last cycle's prediction move the right way,
+    and how's each strategy's rolling accuracy trending. This is the
+    learning loop made visible."""
+    if not reviews:
+        return f"🔁 *{symbol}* — Review (previous cycle)\n\nNothing to review yet (first cycle, or nothing pending)."
+
+    lines = [f"🔁 *{symbol}* — Review (previous cycle)\n"]
+
+    for r in reviews:
+        result_emoji = "✅" if r["correct"] else "❌"
+        acc_text = f"{r['accuracy']}% over {r['sample_size']} reviewed calls" if r["accuracy"] is not None else "not enough data yet"
+        lines.append(f"{result_emoji} *{r['strategy']}*: predicted {r['vote']} @ `{r['entry']}`")
+        lines.append(f"   Price now: `{r['current_price']}` — {'moved as predicted' if r['correct'] else 'moved against the call'}")
+        lines.append(f"   Rolling accuracy: {acc_text}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def format_team_report(symbol: str, agent_results: list, ceo_summary: dict = None) -> str:
     """Shows what every trader actually said, unfiltered — sent every cycle
     regardless of whether they agree. Directional traders (Structure, ICT,
