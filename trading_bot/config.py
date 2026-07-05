@@ -19,7 +19,7 @@ MT5_TERMINAL_PATH = os.getenv("MT5_TERMINAL_PATH", "")  # optional, auto-detect 
 # ---------------------------------------------------------------------------
 # Symbols & timeframes
 # ---------------------------------------------------------------------------
-SYMBOLS = ["EURUSD","USDCHF"]
+SYMBOLS = ["EURUSD","XAUUSD"]
 TIMEFRAMES = ["M15", "H1", "H4", "D1"]  # multi-timeframe context per agent
 PRIMARY_ENTRY_TF = "M15"
 
