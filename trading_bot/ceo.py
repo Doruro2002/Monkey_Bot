@@ -16,6 +16,28 @@ DEFAULT_WEIGHTS = {
 }
 
 
+def get_dynamic_weights(db_path: str, symbol: str, strategy_names: list, min_samples: int = 10) -> Dict[str, float]:
+    """
+    THIS is the "learn from bad trades" loop made concrete: each strategy's
+    influence on the final decision is scaled by its own tracked accuracy
+    for THIS symbol in THIS market's own database (db_path) — a strategy
+    that's been wrong more often on this symbol genuinely gets less say
+    over time. Strategies without enough history yet get a neutral weight.
+    """
+    import prediction_tracker  # local import avoids a circular import at module load time
+
+    weights = {}
+    for name in strategy_names:
+        acc = prediction_tracker.get_accuracy(db_path, symbol, name)
+        if acc["sample_size"] < min_samples or acc["accuracy"] is None:
+            weights[name] = 0.15  # neutral until proven
+        else:
+            weights[name] = round(0.05 + (acc["accuracy"] / 100) * 0.3, 3)
+
+    total = sum(weights.values()) or 1
+    return {k: round(v / total, 3) for k, v in weights.items()}
+
+
 def decide(agent_results: List[dict], weights: Dict[str, float] = None) -> dict:
     """
     agent_results: outputs from structure_agent, ict_agent, quant_agent,

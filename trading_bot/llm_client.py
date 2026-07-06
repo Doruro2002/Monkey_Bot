@@ -30,7 +30,7 @@ def ask(prompt: str, system: str = "") -> str:
             resp = requests.post(
                 config.OLLAMA_URL,
                 json={"model": config.OLLAMA_MODEL, "prompt": prompt, "system": system, "stream": False},
-                timeout=60,
+                timeout=180,  # local inference on modest hardware can be slow, especially on first load
             )
             resp.raise_for_status()
             return resp.json().get("response", "")

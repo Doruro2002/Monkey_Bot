@@ -51,9 +51,8 @@ pip install -r requirements.txt
    `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your chat id.
 3. Set these as environment variables (or edit `config.py` directly):
    ```
-   MT5_LOGIN=109120821 
-   MT5_PASSWORD=*iBw5eBt
-
+   MT5_LOGIN=12345678
+   MT5_PASSWORD=yourpassword
    MT5_SERVER=Exness-MT5Trial
    TELEGRAM_BOT_TOKEN=xxxx
    TELEGRAM_CHAT_ID=xxxx

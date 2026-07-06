@@ -74,14 +74,29 @@ def _llm_reason_directional(persona: str, strategy: str, facts: list, rule_based
     facts_text = "\n".join(f"- {f}" for f in facts)
     prompt = (
         f"You are the {persona} on a trading desk, using a {strategy} approach. "
-        f"Here is the current technical picture:\n{facts_text}\n\n"
+        f"This is a SANDBOX SIMULATION — a research and paper-trading environment, not real "
+        f"brokerage execution. Your output is one input into a larger system; a separate, "
+        f"fixed risk-management program (not you) enforces all position sizing, stop-losses, "
+        f"and trade approval — you are not placing any trade or giving individualized financial "
+        f"advice to a person, you are only producing a research signal for a simulation.\n\n"
+        f"Base your reasoning STRICTLY on the technical facts below — these come from real "
+        f"live market data computed moments ago. Do NOT invent, recall, or assume any price, "
+        f"indicator value, or event not explicitly listed here:\n{facts_text}\n\n"
         f"You must commit to a side — BUY or SELL, never 'wait' or 'neutral'. "
         f"If the evidence is weak or mixed, still pick whichever side has more support, "
         f"and reflect that weakness with a LOW confidence score (e.g. 25-40) rather than "
-        f"refusing to choose. Respond ONLY with JSON, no other text:\n"
+        f"refusing to choose. Respond ONLY with JSON, no other text, no disclaimers:\n"
         f'{{"vote": "BUY" | "SELL", "confidence": 0-100, "reasoning": "one or two sentences"}}'
     )
-    result = llm_client.ask_json(prompt, system=f"You are an expert {persona} on an institutional trading desk.")
+    system = (
+        f"You are a quantitative research analyst operating inside a sandboxed backtesting/"
+        f"paper-trading simulation. You act as the {persona}. Your job is strictly analytical: "
+        f"interpret the provided data and output a structured research signal. You are not "
+        f"interacting with a retail investor, not executing trades, and not giving personalized "
+        f"financial advice — a downstream deterministic program owns all actual risk decisions. "
+        f"Always answer with the requested JSON only, never a refusal or disclaimer."
+    )
+    result = llm_client.ask_json(prompt, system=system)
 
     vote = rule_based_result["vote"]
     confidence = rule_based_result["confidence"]

@@ -1,48 +1,46 @@
 """
 Main loop. Run with:  python main.py
 
-Flow per symbol, each cycle:
-  1. Pull multi-timeframe data (data_feed)
-  2. Run all trader agents (agents)
-  3. CEO combines votes into a consensus + confidence (ceo)
-  4. Risk Manager applies hard vetoes (risk_manager)
-  5. Psychology agent checks for overtrading
-  6. If approved: send Telegram alert, and execute per EXECUTION_MODE
-  7. Log everything to the journal (journal)
+Architecture (brain vs. calculator, as requested):
+  - strategies.py (+ LLM via agents._llm_reason_directional) = the BRAIN.
+    It only ever proposes a direction, a confidence, and a narrative. It
+    never touches account state, position sizing, or the final go/no-go.
+  - guardrail.py = the CALCULATOR. Deterministic, fixed rules in plain
+    Python. No LLM output can override anything it decides. This is the
+    layer that actually protects your account.
+  - ceo.py = combines strategy votes into one consensus, using weights that
+    are increasingly based on each strategy's OWN tracked accuracy per
+    symbol (ceo.get_dynamic_weights) — this is the real learning loop.
 
-IMPORTANT: leave EXECUTION_MODE="analysis_only" until you've watched the
-alerts for at least a few weeks and are confident in the logic.
+One combined Telegram message per symbol per cycle (not split into
+review/predictions separately anymore) — summary and recommended action
+at the top, full detail below, review of last cycle at the bottom.
+Telegram's 4096-char hard limit means very rare edge cases may still need
+a second message; telegram_bot.send_long_alert() handles that automatically.
 """
 
 import logging
 import time
 import uuid
 
-import agents
 import ceo
 import config
 import data_feed
+import executor
+import guardrail
 import indicators
 import journal
-import risk_manager
+import news_calendar
+import news_sentiment
+import prediction_tracker
+import strategies
 import telegram_bot
 from telegram_listener import PENDING_TRADES
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("main")
 
-# session-state counters (reset daily in a real deployment — kept simple here)
-_state = {
-    "trades_today": 0,
-    "consecutive_losses": 0,
-    "daily_pnl_pct": 0.0,
-}
-
-
-def get_upcoming_news() -> list:
-    """Plug in a real economic calendar source here (e.g. an API/scrape of
-    a forex factory-style calendar). Returning [] disables the news veto."""
-    return []
+_state = {"trades_today": 0, "consecutive_losses": 0, "daily_pnl_pct": 0.0}
 
 
 def run_cycle_for_symbol(symbol: str):
@@ -51,106 +49,82 @@ def run_cycle_for_symbol(symbol: str):
     last_close = ltf["close"].iloc[-1]
     atr_val = indicators.atr(ltf).iloc[-1]
 
-    # --- run all 6 traders (Structure, ICT, Quant, News, Psychology, and
-    # Devil's Advocate as the 6th — a genuine contrarian perspective, not a
-    # veto-only role in how it's reported here) ---
-    core_votes = [
-        agents.structure_agent(data),
-        agents.ict_agent(data),
-        agents.quant_agent(data),
-        agents.news_agent(get_upcoming_news(), data),
-        agents.psychology_agent(_state["trades_today"], _state["consecutive_losses"]),
-    ]
+    # --- Review last cycle's predictions (the visible learning loop) ---
+    reviews = prediction_tracker.review_and_get_reports(symbol, last_close)
 
-    # CEO's directional read, used to give Devil's Advocate something to
-    # argue against — but this does NOT gate whether you get notified.
-    prelim = ceo.decide(core_votes)
-    lean_direction = prelim["consensus"] if prelim["consensus"] != "WAIT" else "BUY"
-    devils = agents.devils_advocate_agent(data, lean_direction)
+    # --- Fresh predictions from all 9 strategies (the "brain") ---
+    upcoming_events = news_calendar.get_upcoming_events_for_symbol(symbol)
+    predictions = strategies.run_all(data, upcoming_events)
+    prediction_tracker.save_predictions(symbol, predictions)
 
-    all_votes = core_votes + [devils]
-    final_with_devils = ceo.decide(all_votes)
+    # --- Real news headlines (never invented by the LLM) ---
+    sentiment = news_sentiment.get_symbol_sentiment(symbol)
 
-    # --- ALWAYS send the team report, every cycle, regardless of agreement ---
-    report_text = telegram_bot.format_team_report(symbol, all_votes, final_with_devils)
-    telegram_bot.send_plain_alert(report_text)
-    log.info("%s: report sent — CEO read %s (%s%%)", symbol, final_with_devils["consensus"], final_with_devils["confidence"])
+    # --- CEO consensus, weighted by each strategy's OWN tracked accuracy ---
+    strategy_names = [p["name"] for p in predictions]
+    dynamic_weights = ceo.get_dynamic_weights(symbol, strategy_names)
+    final = ceo.decide(predictions, weights=dynamic_weights)
 
-    # --- everything below this line is about whether to actually TRADE,
-    # not about whether to notify you. This gating stays in place because
-    # it controls money movement, not information. ---
-    if final_with_devils["consensus"] == "WAIT" or final_with_devils["confidence"] < config.MIN_CONFIDENCE_TO_ALERT:
-        return
-
-    direction = final_with_devils["consensus"]
+    # --- Guardrail: the deterministic calculator, always evaluated so the
+    # report can show its verdict, even if the CEO consensus is weak/WAIT ---
+    direction = final["consensus"] if final["consensus"] != "WAIT" else "BUY"
     entry = last_close
     if direction == "BUY":
-        sl = entry - atr_val * 1.5
-        tp1 = entry + atr_val * 3
-        tp2 = entry + atr_val * 4.5
+        sl, tp1 = entry - atr_val * 1.5, entry + atr_val * 3
     else:
-        sl = entry + atr_val * 1.5
-        tp1 = entry - atr_val * 3
-        tp2 = entry - atr_val * 4.5
+        sl, tp1 = entry + atr_val * 1.5, entry - atr_val * 3
 
-    rr = risk_manager.calc_rr(entry, sl, tp1)
-
-    # --- risk manager veto (hard) ---
     open_positions = []
     try:
         open_positions = data_feed.get_open_positions()
     except Exception:
-        pass  # analysis-only mode without MT5 connected
+        pass
 
-    allowed, reason = risk_manager.check_hard_limits(_state["daily_pnl_pct"], len(open_positions))
-    if not allowed:
-        log.warning("Risk manager blocked trading: %s", reason)
-        return
-
-    risk_check = agents.risk_agent(
-        account_equity=10000,  # replace with data_feed.get_account_info()["equity"] when live
-        open_positions=open_positions,
-        daily_pnl_pct=_state["daily_pnl_pct"],
-        proposed_rr=rr,
-        min_rr=config.MIN_RR_RATIO,
-        max_open=config.MAX_OPEN_TRADES,
-        max_daily_loss_pct=config.MAX_DAILY_LOSS_PCT,
-    )
-    if risk_check["vote"] not in ("APPROVE",):
-        log.info("%s: risk manager said %s — %s", symbol, risk_check["vote"], risk_check["reasons"])
-        return
-
-    lots = risk_manager.calc_position_size(
-        account_equity=10000, entry=entry, stop_loss=sl, pip_value_per_lot=10.0
+    guardrail_result = guardrail.check(
+        symbol=symbol, direction=direction, entry=entry, sl=sl, tp=tp1,
+        account_equity=10000, open_positions_count=len(open_positions),
+        daily_pnl_pct=_state["daily_pnl_pct"], consecutive_losses=_state["consecutive_losses"],
+        trades_today=_state["trades_today"], upcoming_news_events=upcoming_events, ltf_df=ltf,
     )
 
+    # --- ONE combined message per symbol ---
+    report_text = telegram_bot.format_full_report(
+        symbol, reviews, predictions, final, guardrail_result, sentiment.get("headlines")
+    )
+    telegram_bot.send_long_alert(report_text)
+    log.info("%s: report sent — CEO %s (%s%%), guardrail %s",
+              symbol, final["consensus"], final["confidence"], "ALLOWED" if guardrail_result["allowed"] else "BLOCKED")
+
+    # --- Actual execution, only in confirm/auto modes, only if guardrail allows ---
+    if config.EXECUTION_MODE == "analysis_only":
+        return
+    if final["consensus"] == "WAIT" or final["confidence"] < config.MIN_CONFIDENCE_TO_ALERT:
+        return
+    if not guardrail_result["allowed"]:
+        return
+
+    lots_placeholder = 0.01  # replace with risk_manager.calc_position_size using real pip value before going live
     trade_id = str(uuid.uuid4())[:8]
-    approvals = f"{len([v for v in all_votes if v['vote'] in ('BUY', 'SELL', 'APPROVE', 'PASS')])}/{len(all_votes)}"
-    text = telegram_bot.format_trade_alert(symbol, final_with_devils, entry, sl, tp1, tp2, rr, lots, approvals)
+    approvals = f"{sum(1 for p in predictions if p['vote'] == final['consensus'])}/{len(predictions)}"
+    alert_text = telegram_bot.format_trade_alert(symbol, final, entry, sl, tp1, tp1, guardrail_result["rr"], lots_placeholder, approvals)
 
     journal.log_trade(
-        trade_id=trade_id, symbol=symbol, direction=direction, entry=entry, sl=sl,
-        tp=tp1, lots=lots, rr=rr, confidence=final_with_devils["confidence"],
-        agent_votes=all_votes, executed=(config.EXECUTION_MODE == "auto"),
+        trade_id=trade_id, symbol=symbol, direction=final["consensus"], entry=entry, sl=sl,
+        tp=tp1, lots=lots_placeholder, rr=guardrail_result["rr"], confidence=final["confidence"],
+        agent_votes=predictions, executed=(config.EXECUTION_MODE == "auto"),
     )
 
-    if config.EXECUTION_MODE == "analysis_only":
-        telegram_bot.send_plain_alert(text + "\n\n_(analysis_only — nothing executed)_")
-
-    elif config.EXECUTION_MODE == "confirm":
-        PENDING_TRADES[trade_id] = {
-            "symbol": symbol, "direction": direction, "lots": lots,
-            "entry": entry, "sl": sl, "tp": tp1,
-        }
-        telegram_bot.send_trade_alert_with_confirmation(text, trade_id)
+    if config.EXECUTION_MODE == "confirm":
+        PENDING_TRADES[trade_id] = {"symbol": symbol, "direction": final["consensus"], "lots": lots_placeholder,
+                                     "entry": entry, "sl": sl, "tp": tp1}
+        telegram_bot.send_trade_alert_with_confirmation(alert_text, trade_id)
 
     elif config.EXECUTION_MODE == "auto":
-        if final_with_devils["confidence"] >= config.MIN_CONFIDENCE_TO_AUTO_EXECUTE:
-            import executor
-            executor.place_order(symbol, direction, lots, entry, sl, tp1)
-            telegram_bot.send_plain_alert(text + "\n\n_(auto-executed)_")
+        if final["confidence"] >= config.MIN_CONFIDENCE_TO_AUTO_EXECUTE:
+            executor.place_order(symbol, final["consensus"], lots_placeholder, entry, sl, tp1)
+            telegram_bot.send_plain_alert(alert_text + "\n\n_(auto-executed)_")
         else:
-            telegram_bot.send_plain_alert(text + "\n\n_(confidence below auto-execute threshold — not sent to broker)_")
+            telegram_bot.send_plain_alert(alert_text + "\n\n_(confidence below auto-execute threshold — not sent to broker)_")
 
     _state["trades_today"] += 1
 
@@ -158,8 +132,12 @@ def run_cycle_for_symbol(symbol: str):
 def main():
     connected = data_feed.connect()
     if not connected:
-        log.warning("Running WITHOUT a live MT5 connection — data calls will fail. "
-                     "This is expected on non-Windows dev machines; wire up MT5 on your live host.")
+        log.warning("Running WITHOUT a live MT5 connection — data calls will fail.")
+
+    telegram_bot.send_plain_alert(
+        f"🟢 Bot started/restarted. Watching: {', '.join(config.SYMBOLS)}. "
+        f"One combined report per symbol every {config.POLL_INTERVAL_SECONDS // 60} min."
+    )
 
     try:
         while True:

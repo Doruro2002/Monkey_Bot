@@ -19,9 +19,19 @@ MT5_TERMINAL_PATH = os.getenv("MT5_TERMINAL_PATH", "")  # optional, auto-detect 
 # ---------------------------------------------------------------------------
 # Symbols & timeframes
 # ---------------------------------------------------------------------------
-SYMBOLS = ["EURUSD","XAUUSD"]
-TIMEFRAMES = ["M15", "H1", "H4", "D1"]  # multi-timeframe context per agent
+SYMBOLS = ["EURUSD", "GBPUSD"]   # forex-only focus, two most liquid pairs
+TIMEFRAMES = ["M15", "H1", "H4", "D1"]  # multi-timeframe context per strategy
 PRIMARY_ENTRY_TF = "M15"
+
+# ---------------------------------------------------------------------------
+# Crypto (separate pipeline — uses ccxt + a real exchange's public API,
+# NOT MetaTrader5. Most MT5 servers don't offer USDT pairs at all.)
+# ---------------------------------------------------------------------------
+CRYPTO_EXCHANGE = os.getenv("CRYPTO_EXCHANGE", "binance")   # any ccxt-supported exchange id
+CRYPTO_SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT"]
+CRYPTO_TIMEFRAMES = ["15m", "1h", "4h", "1d"]   # ccxt timeframe strings
+CRYPTO_PRIMARY_ENTRY_TF = "15m"
+CRYPTO_POLL_INTERVAL_SECONDS = 900   # 15 min, matches entry timeframe
 
 # ---------------------------------------------------------------------------
 # LLM backend (optional — agents work with pure rule-based logic if this is
@@ -57,13 +67,29 @@ MIN_RR_RATIO = 2.0              # reject trades below this reward:risk
 MIN_CONFIDENCE_TO_ALERT = 65    # % - below this, don't even notify
 MIN_CONFIDENCE_TO_AUTO_EXECUTE = 80
 NEWS_BLACKOUT_MINUTES = 15      # no new trades within N minutes of high-impact news
+MAX_CONSECUTIVE_LOSSES = 3      # cooldown trigger for the guardrail
+MAX_TRADES_PER_DAY = 5          # hard overtrading cap, enforced in guardrail.py
+BLOCK_TRADES_IN_HIGH_VOLATILITY = True
+
+# ---------------------------------------------------------------------------
+# News sentiment (Finnhub — free tier, needs a free API key)
+# ---------------------------------------------------------------------------
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
 DB_PATH = os.getenv("DB_PATH", "trading_journal.db")
+PREDICTIONS_DB_PATH = os.getenv("PREDICTIONS_DB_PATH", "predictions.db")
+
+# ---------------------------------------------------------------------------
+# News calendar (real feed — public, free, no API key required)
+# ---------------------------------------------------------------------------
+NEWS_CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+NEWS_KEYWORDS = ["Non-Farm", "NFP", "CPI", "FOMC", "Interest Rate", "GDP"]
+NEWS_HIGH_IMPACT_ONLY = True
 
 # ---------------------------------------------------------------------------
 # Loop timing
 # ---------------------------------------------------------------------------
-POLL_INTERVAL_SECONDS = 900 
+POLL_INTERVAL_SECONDS = 900   # 15 min — matches PRIMARY_ENTRY_TF

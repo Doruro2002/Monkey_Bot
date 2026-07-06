@@ -1,4 +1,5 @@
 pandas>=2.0
 numpy>=1.24
 requests>=2.31
-MetaTrader5>=5.0.45   # Windows only
+MetaTrader5>=5.0.45   # Windows only, forex/MT5 side
+ccxt>=4.0              # crypto side — no Windows/MT5 requirement
