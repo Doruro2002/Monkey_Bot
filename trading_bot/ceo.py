@@ -22,15 +22,21 @@ def get_dynamic_weights(db_path: str, symbol: str, strategy_names: list, min_sam
     influence on the final decision is scaled by its own tracked accuracy
     for THIS symbol in THIS market's own database (db_path) — a strategy
     that's been wrong more often on this symbol genuinely gets less say
-    over time. Strategies without enough history yet get a neutral weight.
+    over time. Strategies without enough history yet fall back to
+    regime_engine.TIER_PRIORS (an informed cold-start default — SMC/ICT
+    trusted slightly more early on, since order-flow models are generally
+    considered higher-fidelity than lagging trend indicators) — NOT a
+    claim that this is proven, just a reasonable starting point until real
+    tracked data takes over completely.
     """
     import prediction_tracker  # local import avoids a circular import at module load time
+    import regime_engine
 
     weights = {}
     for name in strategy_names:
         acc = prediction_tracker.get_accuracy(db_path, symbol, name)
         if acc["sample_size"] < min_samples or acc["accuracy"] is None:
-            weights[name] = 0.15  # neutral until proven
+            weights[name] = regime_engine.TIER_PRIORS.get(name, 0.10)
         else:
             weights[name] = round(0.05 + (acc["accuracy"] / 100) * 0.3, 3)
 
@@ -38,11 +44,15 @@ def get_dynamic_weights(db_path: str, symbol: str, strategy_names: list, min_sam
     return {k: round(v / total, 3) for k, v in weights.items()}
 
 
-def decide(agent_results: List[dict], weights: Dict[str, float] = None) -> dict:
+def decide(agent_results: List[dict], weights: Dict[str, float] = None,
+           devils_advocate_result: dict = None, devils_advocate_veto_min_confidence: int = 65) -> dict:
     """
-    agent_results: outputs from structure_agent, ict_agent, quant_agent,
-    news_agent, psychology_agent, devils_advocate_agent (NOT risk_agent —
-    that one is applied separately as a hard veto in main.py).
+    agent_results: the 9 strategy predictions from strategies.run_all().
+    devils_advocate_result (optional, separate from agent_results): if
+    provided and its vote is REJECT with confidence >= the threshold, this
+    is a hard veto regardless of everything else — a REJECT below the
+    threshold is logged but does NOT block the trade (a weak contrarian
+    objection shouldn't override real confluence; only a confident one should).
     """
     weights = weights or DEFAULT_WEIGHTS
 
@@ -53,23 +63,25 @@ def decide(agent_results: List[dict], weights: Dict[str, float] = None) -> dict:
     vetoed = False
     veto_reasons = []
 
+    if devils_advocate_result:
+        da = devils_advocate_result
+        all_reasons.append(f"DevilsAdvocate: {da['vote']} ({da['confidence']}%) — {'; '.join(da['reasons'])}")
+        if da["vote"] == "REJECT" and da["confidence"] >= devils_advocate_veto_min_confidence:
+            vetoed = True
+            veto_reasons.append(da["reasons"])
+
     # Psychology structurally never votes BUY/SELL (APPROVE/WAIT only) — it's
     # oversight, not a market call. Its weight must NOT dilute the
     # denominator, or consensus becomes mathematically capped below 100%
-    # even when every directional agent agrees. News is now directional
-    # (see agents.py) so it stays IN the tally, except for its hard veto
-    # case below (imminent high-impact news), which still overrides everything.
+    # even when every directional agent agrees. News is directional (see
+    # agents.py) so it stays IN the tally, except for its hard veto case
+    # below (imminent high-impact news), which still overrides everything.
     NON_DIRECTIONAL_AGENTS = {"Psychology"}
 
     for r in agent_results:
         name = r["name"]
         w = weights.get(name, 0.1)
         all_reasons.append(f"{name}: {r['vote']} ({r['confidence']}%) — {'; '.join(r['reasons'])}")
-
-        if name == "DevilsAdvocate" and r["vote"] == "REJECT":
-            vetoed = True
-            veto_reasons.append(r["reasons"])
-            continue
 
         if name == "News" and r["vote"] == "WAIT" and r["confidence"] >= 90:
             vetoed = True

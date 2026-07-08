@@ -99,7 +99,10 @@ def run_cycle_for_symbol(symbol: str):
         trades_today=_state["trades_today"], upcoming_news_events=[], ltf_df=ltf,
     )
 
-    report_text = telegram_bot.format_full_report(symbol, reviews, predictions, final, guardrail_result, sentiment.get("headlines"))
+    report_text = telegram_bot.format_full_report(
+        symbol, reviews, predictions, final, guardrail_result, sentiment.get("headlines"),
+        top_combinations_by_size=prediction_tracker.get_top_combinations_all_sizes(PREDICTIONS_DB_PATH, symbol),
+    )
     telegram_bot.send_long_alert(report_text, token=TG_TOKEN, chat_id=TG_CHAT)
     log.info("%s: report sent — CEO %s (%s%%), guardrail %s",
               symbol, final["consensus"], final["confidence"], "ALLOWED" if guardrail_result["allowed"] else "BLOCKED")

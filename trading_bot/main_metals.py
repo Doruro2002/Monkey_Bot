@@ -1,10 +1,23 @@
 """
-Metals bot (Gold + Silver) — own Telegram bot, own database.
-Run with: python main_metals.py
+Metals bot — own Telegram bot, own database. Run with: python main_metals.py
 
-Identical architecture to main_forex.py — same MT5 connection can serve
-both (most brokers offering forex also offer XAUUSD/XAGUSD), but tracked,
-reported, and rate-limited completely separately with its own DB and bot.
+What's in each report (ONE combined Telegram message per symbol):
+  - Quick summary + guardrail-gated recommendation + always-directional
+    "Trading Advisor" line (never just bare "wait" with nothing else)
+  - Strategy table (all 9 strategies, sorted by confidence)
+  - Real news headlines (Finnhub)
+  - Review of last cycle's predictions (the visible learning loop)
+
+Every 4 review cycles, a separate, smaller "Learning Report" is sent
+instead — a step back from the noise to summarize which strategies are
+earning/losing trust and what the overall market lean has been.
+
+Safety: this system is ASSISTED, not AUTONOMOUS. EXECUTION_MODE defaults
+to analysis_only. The guardrail (guardrail.py) enforces hard, deterministic
+risk rules that no LLM output can override. If the daily drawdown limit is
+breached, this bot SHUTS DOWN entirely (not just skips a trade) and alerts
+you — matching the "set hard bounds, shut down on max daily drawdown"
+principle. You restart it manually after reviewing what happened.
 """
 
 import logging
@@ -17,15 +30,21 @@ import data_feed
 import guardrail
 import indicators
 import llm_client
+import market_hours
 import news_calendar
 import news_sentiment
 import prediction_tracker
+import regime_engine
+import risk_manager
 import strategies
 import telegram_bot
+from agents import devils_advocate_agent
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("main_metals")
 
+# Apply this market's overrides onto the shared config module. Safe because
+# this runs as its own separate OS process — metals/crypto have their own.
 config.SYMBOLS = market.SYMBOLS
 config.TIMEFRAMES = market.TIMEFRAMES
 config.PRIMARY_ENTRY_TF = market.PRIMARY_ENTRY_TF
@@ -38,6 +57,7 @@ TG_CHAT = market.TELEGRAM_CHAT_ID
 
 _state = {"trades_today": 0, "consecutive_losses": 0, "daily_pnl_pct": 0.0}
 _shutdown = {"triggered": False}
+_market_status = {}  # symbol -> bool (last known open/closed state), for transition-only alerts
 
 
 def build_market_lean_summary(predictions: list) -> str:
@@ -75,23 +95,58 @@ def maybe_send_learning_report(symbol: str, predictions: list):
 def run_cycle_for_symbol(symbol: str):
     data = data_feed.get_multi_timeframe_snapshot(symbol)
     ltf = data[config.PRIMARY_ENTRY_TF]
+
+    status = market_hours.is_market_open(ltf, config.POLL_INTERVAL_SECONDS)
+    was_open = _market_status.get(symbol, True)
+
+    if not status["open"]:
+        if was_open:  # just transitioned from open -> closed — notify once
+            telegram_bot.send_plain_alert(
+                f"🌙 *{symbol}* — Market closed. {status['reason']}. Pausing predictions until it reopens.",
+                token=TG_TOKEN, chat_id=TG_CHAT,
+            )
+        _market_status[symbol] = False
+        log.info("%s: market closed (%s) — skipping cycle entirely", symbol, status["reason"])
+        return
+
+    if not was_open:  # just transitioned from closed -> open — notify once
+        telegram_bot.send_plain_alert(f"🔔 *{symbol}* — Market reopened. Resuming predictions.",
+                                       token=TG_TOKEN, chat_id=TG_CHAT)
+    _market_status[symbol] = True
+
     last_close = ltf["close"].iloc[-1]
     atr_val = indicators.atr(ltf).iloc[-1]
 
     reviews = prediction_tracker.review_and_get_reports(PREDICTIONS_DB_PATH, symbol, last_close)
 
-    upcoming_events = news_calendar.get_upcoming_events_for_symbol(symbol) if len(symbol) == 6 else []
+    upcoming_events = news_calendar.get_upcoming_events_for_symbol(symbol)
     predictions = strategies.run_all(data, upcoming_events)
     prediction_tracker.save_predictions(PREDICTIONS_DB_PATH, symbol, predictions)
 
     sentiment = news_sentiment.get_symbol_sentiment(symbol)
 
     strategy_names = [p["name"] for p in predictions]
-    dynamic_weights = ceo.get_dynamic_weights(PREDICTIONS_DB_PATH, symbol, strategy_names)
-    final = ceo.decide(predictions, weights=dynamic_weights)
+    base_weights = ceo.get_dynamic_weights(PREDICTIONS_DB_PATH, symbol, strategy_names)
+    dynamic_weights, regime, session = regime_engine.apply_regime_and_session_adjustment(base_weights, ltf)
+
+    # Preliminary direction (no Devil's Advocate yet) so it knows which side to attack
+    prelim = ceo.decide(predictions, weights=dynamic_weights)
+    lean_direction = prelim["consensus"] if prelim["consensus"] != "WAIT" else "BUY"
+    devils_result = devils_advocate_agent(data, lean_direction)
+
+    final = ceo.decide(predictions, weights=dynamic_weights, devils_advocate_result=devils_result,
+                        devils_advocate_veto_min_confidence=config.DEVILS_ADVOCATE_VETO_MIN_CONFIDENCE)
 
     direction = final["consensus"] if final["consensus"] != "WAIT" else "BUY"
-    entry = last_close
+
+    # --- Entry: prefer an FVG-boundary LIMIT entry from the winning
+    # direction's SMC/ICT call over chasing the market price, when available ---
+    fvg_candidates = [p for p in predictions if p["name"] in ("SMC", "ICT")
+                       and p["vote"] == direction and p.get("fvg_boundary") is not None]
+    use_limit_entry = bool(fvg_candidates)
+    entry = fvg_candidates[0]["fvg_boundary"] if use_limit_entry else last_close
+    has_confirmation = indicators.detect_micro_rejection(ltf, entry, direction) if use_limit_entry else False
+
     if direction == "BUY":
         sl, tp1 = entry - atr_val * 1.5, entry + atr_val * 3
     else:
@@ -103,25 +158,75 @@ def run_cycle_for_symbol(symbol: str):
     except Exception:
         pass
 
+    current_spread = None
+    try:
+        current_spread = data_feed.get_spread_pips(symbol)
+    except Exception:
+        pass
+
     guardrail_result = guardrail.check(
         symbol=symbol, direction=direction, entry=entry, sl=sl, tp=tp1,
         account_equity=10000, open_positions_count=len(open_positions),
         daily_pnl_pct=_state["daily_pnl_pct"], consecutive_losses=_state["consecutive_losses"],
         trades_today=_state["trades_today"], upcoming_news_events=upcoming_events, ltf_df=ltf,
+        htf_df=data["H4"], current_spread_pips=current_spread,
+        is_anticipation_entry=use_limit_entry, has_confirmation=has_confirmation,
     )
+    guardrail_result["reasons"].append(f"Regime: {regime}, Session: {session}")
+    if use_limit_entry:
+        guardrail_result["reasons"].append(f"Entry style: LIMIT @ FVG boundary {entry} (not chasing market price)")
 
-    report_text = telegram_bot.format_full_report(symbol, reviews, predictions, final, guardrail_result, sentiment.get("headlines"))
+    report_text = telegram_bot.format_full_report(
+        symbol, reviews, predictions, final, guardrail_result, sentiment.get("headlines"),
+        top_combinations_by_size=prediction_tracker.get_top_combinations_all_sizes(PREDICTIONS_DB_PATH, symbol),
+    )
     telegram_bot.send_long_alert(report_text, token=TG_TOKEN, chat_id=TG_CHAT)
     log.info("%s: report sent — CEO %s (%s%%), guardrail %s",
               symbol, final["consensus"], final["confidence"], "ALLOWED" if guardrail_result["allowed"] else "BLOCKED")
 
     maybe_send_learning_report(symbol, predictions)
 
+    # --- Actual execution — only in confirm/auto modes, only if guardrail allows.
+    # Position size now uses the REAL risk %, scaled by the guardrail's
+    # size_multiplier (structural lock) and risk_multiplier (pre-news window)
+    # — not a hardcoded placeholder. ---
+    if config.EXECUTION_MODE != "analysis_only" and guardrail_result["allowed"] and \
+       final["consensus"] != "WAIT" and final["confidence"] >= config.MIN_CONFIDENCE_TO_ALERT:
+
+        effective_risk_pct = config.RISK_PER_TRADE_PCT * guardrail_result["size_multiplier"] * guardrail_result["risk_multiplier"]
+        lots = risk_manager.calc_position_size(
+            account_equity=10000, entry=entry, stop_loss=sl,
+            pip_value_per_lot=10.0,  # TODO: replace with real mt5.symbol_info(symbol) pip value before going live
+            risk_pct=effective_risk_pct,
+        )
+
+        import uuid
+        trade_id = str(uuid.uuid4())[:8]
+        approvals = f"{sum(1 for p in predictions if p['vote'] == final['consensus'])}/{len(predictions)}"
+        alert_text = telegram_bot.format_trade_alert(symbol, final, entry, sl, tp1, tp1, guardrail_result["rr"], lots, approvals)
+
+        if config.EXECUTION_MODE == "confirm":
+            from telegram_listener import PENDING_TRADES
+            PENDING_TRADES[trade_id] = {"symbol": symbol, "direction": final["consensus"], "lots": lots,
+                                         "entry": entry, "sl": sl, "tp": tp1}
+            telegram_bot.send_trade_alert_with_confirmation(alert_text, trade_id, token=TG_TOKEN, chat_id=TG_CHAT)
+
+        elif config.EXECUTION_MODE == "auto" and final["confidence"] >= config.MIN_CONFIDENCE_TO_AUTO_EXECUTE:
+            import executor
+            if use_limit_entry:
+                executor.place_limit_order(symbol, final["consensus"], lots, entry, sl, tp1)
+            else:
+                executor.place_order(symbol, final["consensus"], lots, entry, sl, tp1)
+            telegram_bot.send_plain_alert(alert_text + "\n\n_(auto-executed)_", token=TG_TOKEN, chat_id=TG_CHAT)
+
+        _state["trades_today"] += 1
+
+    # --- Kill-switch: hard shutdown on daily drawdown breach, not just a skip ---
     if any("Daily loss limit" in r for r in guardrail_result["reasons"]):
         _shutdown["triggered"] = True
         telegram_bot.send_plain_alert(
             f"🛑 *{symbol}* — Daily drawdown limit hit. Bot is SHUTTING DOWN, not just skipping this trade. "
-            f"Review before restarting manually.",
+            f"Review what happened before restarting manually.",
             token=TG_TOKEN, chat_id=TG_CHAT,
         )
 

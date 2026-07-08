@@ -109,6 +109,27 @@ def range_bounds(df: pd.DataFrame, lookback: int = 30) -> dict:
     return {"range_high": recent["high"].max(), "range_low": recent["low"].min()}
 
 
+def detect_micro_rejection(df: pd.DataFrame, level: float, direction: str, lookback: int = 5) -> bool:
+    """
+    'Anticipation needs SOME confirmation, not a blind entry' — checks the
+    last few bars for a rejection wick or close moving back away from a
+    level in the expected direction. Used to decide whether an FVG-boundary
+    limit entry gets full or reduced ('probe') size — see guardrail.py.
+    Not a requirement to cancel the entry, just a sizing signal: price
+    reacting at the level is a better sign than merely reaching it.
+    """
+    recent = df.iloc[-lookback:]
+    if direction == "BUY":
+        # look for a lower wick (rejection down) followed by closing back up
+        wicked_below = (recent["low"] <= level * 1.0005).any()
+        closed_above = recent["close"].iloc[-1] > level
+        return bool(wicked_below and closed_above)
+    else:
+        wicked_above = (recent["high"] >= level * 0.9995).any()
+        closed_below = recent["close"].iloc[-1] < level
+        return bool(wicked_above and closed_below)
+
+
 def detect_breakout_retest(df: pd.DataFrame, lookback: int = 30, retest_tolerance_atr: float = 0.5) -> dict:
     """
     Looks for: price broke out of the recent range, and has since pulled

@@ -86,6 +86,22 @@ def get_multi_timeframe_snapshot(symbol: str) -> Dict[str, pd.DataFrame]:
     return {tf: get_ohlc(symbol, tf) for tf in config.TIMEFRAMES}
 
 
+def get_spread_pips(symbol: str) -> float:
+    """Current broker spread in pips — used by guardrail.py's spread
+    invalidation check. Returns None if unavailable (e.g. not connected)."""
+    if mt5 is None:
+        return None
+    info = mt5.symbol_info(symbol)
+    tick = mt5.symbol_info_tick(symbol)
+    if info is None or tick is None:
+        return None
+    point = info.point
+    spread_price = tick.ask - tick.bid
+    # rough pip conversion: for most FX/metals, 1 pip = 10 * point on 5-digit brokers
+    pip_size = point * 10 if info.digits in (3, 5) else point
+    return round(spread_price / pip_size, 2) if pip_size else None
+
+
 def get_account_info() -> dict:
     if mt5 is None:
         raise RuntimeError("MetaTrader5 package not available.")

@@ -246,7 +246,8 @@ def format_learning_report(symbol: str, accuracies: dict, market_lean: str, llm_
 
 
 def format_full_report(symbol: str, reviews: list, predictions: list, ceo_summary: dict,
-                        guardrail_result: dict = None, sentiment_headlines: list = None) -> str:
+                        guardrail_result: dict = None, sentiment_headlines: list = None,
+                        top_combinations_by_size: dict = None) -> str:
     """
     ONE message, built for fast scanning:
       1. Quick summary + recommended action (read this, done if you're busy)
@@ -264,11 +265,20 @@ def format_full_report(symbol: str, reviews: list, predictions: list, ceo_summar
     sell_count = sum(1 for p in predictions if p["vote"] == "SELL")
     top_call = max(predictions, key=lambda p: p["confidence"]) if predictions else None
 
+    # Confluence visibility (informational only — NOT a hardcoded "80% win
+    # rate" rule; just shows how many of the core order-flow-style
+    # strategies agree with the CEO's direction, for your own judgment)
+    core_names = {"SMC", "ICT", "PriceAction", "SupplyDemand", "DayTrading"}
+    core_predictions = [p for p in predictions if p["name"] in core_names]
+    core_aligned = sum(1 for p in core_predictions if p["vote"] == ceo_summary["consensus"])
+
     lines = [f"📈 *{symbol}* — Full Report\n"]
 
     # --- Quick summary ---
     lines.append("*── Quick Summary ──*")
     lines.append(f"🟢{buy_count} BUY  /  🔴{sell_count} SELL   |   CEO: *{ceo_summary['consensus']}* ({ceo_summary['confidence']}%)")
+    if ceo_summary["consensus"] != "WAIT":
+        lines.append(f"Core confluence (SMC/ICT/PriceAction/SupplyDemand/DayTrading): {core_aligned}/{len(core_predictions)} aligned")
     if top_call:
         lines.append(f"Most confident: *{top_call['name']}* → {top_call['vote']} ({top_call['confidence']}%)")
 
@@ -301,6 +311,27 @@ def format_full_report(symbol: str, reviews: list, predictions: list, ceo_summar
         tp1 = _pad(r["tp1"], 9)
         table_rows.append(f"{name} {vote} {conf} {entry} {sl} {tp1}")
     lines.append("```\n" + "\n".join(table_rows) + "\n```")
+
+    # --- Top combinations, built from REAL tracked history, not a one-off report ---
+    lines.append("*── Top Combinations (tracked) ──*")
+    size_labels = {2: "Pairs", 3: "Triplets", 4: "Quads", 5: "Quintuplets"}
+    if top_combinations_by_size:
+        any_shown = False
+        for size in sorted(top_combinations_by_size.keys()):
+            combos = top_combinations_by_size[size]
+            label = size_labels.get(size, f"{size}-combos")
+            if combos:
+                any_shown = True
+                lines.append(f"   _{label}:_")
+                for c in combos:
+                    names_joined = " + ".join(c["combo"])
+                    lines.append(f"     {names_joined} → {c['direction']}: *{c['win_rate']}%* ({c['sample_size']} agreed-cycles)")
+            else:
+                lines.append(f"   _{label}:_ still building history")
+        if not any_shown:
+            lines.append("   Still building history — need more reviewed cycles before any combination clears the minimum sample size.")
+    else:
+        lines.append("   Still building history — need more reviewed cycles before any combination clears the minimum sample size.")
 
     # --- Real news headlines ---
     if sentiment_headlines:

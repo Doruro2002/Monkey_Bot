@@ -91,9 +91,14 @@ def smart_money_concepts(data: Dict[str, pd.DataFrame]) -> dict:
     bos = indicators.detect_bos(ltf)
 
     facts = [f"BOS/CHoCH read: {bos}", f"Unfilled FVGs: {len(gaps)}"]
+    fvg_boundary = None
 
     if gaps:
-        gap_type = gaps[-1][0]
+        gap_type, gap_low, gap_high, _ = gaps[-1]
+        # Price retracing into a gap touches the NEAR edge first: for a
+        # bullish gap (below current price) that's the upper boundary; for
+        # a bearish gap (above current price) that's the lower boundary.
+        fvg_boundary = gap_high if gap_type == "bullish" else gap_low
         aligned = (gap_type == "bullish" and bos != "bearish_bos") or (gap_type == "bearish" and bos != "bullish_bos")
         vote = "BUY" if gap_type == "bullish" else "SELL"
         conf = 65 if aligned else 30
@@ -102,8 +107,11 @@ def smart_money_concepts(data: Dict[str, pd.DataFrame]) -> dict:
         vote = "SELL" if bos == "bearish_bos" else "BUY"
         rule_result = _base_result("SMC", vote, 25, facts + ["No fresh imbalance — leaning on structure only"])
 
-    return _llm_reason_directional("Smart Money Concepts Trader", "SMC (order blocks, FVG, BOS/CHoCH, liquidity)",
-                                    facts, rule_result, last_close, atr_val)
+    result = _llm_reason_directional("Smart Money Concepts Trader", "SMC (order blocks, FVG, BOS/CHoCH, liquidity)",
+                                      facts, rule_result, last_close, atr_val)
+    if fvg_boundary is not None:
+        result["fvg_boundary"] = round(fvg_boundary, 5)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -119,13 +127,17 @@ def ict_strategy(data: Dict[str, pd.DataFrame]) -> dict:
     facts = [f"Daily bias (D1 trend): {d1_trend}", f"Recent imbalances: {len(gaps)}"]
 
     vote = "BUY" if d1_trend != "down" else "SELL"
-    supporting_gap = any(g[0] == ("bullish" if vote == "BUY" else "bearish") for g in gaps)
+    supporting_gap = next((g for g in gaps if g[0] == ("bullish" if vote == "BUY" else "bearish")), None)
     conf = 60 if supporting_gap else 30
     rule_result = _base_result("ICT", vote, conf,
                                 facts + [f"{'Imbalance supports' if supporting_gap else 'No imbalance confirming'} daily bias"])
 
-    return _llm_reason_directional("ICT Trader", "ICT (kill zones, OTE, liquidity, SMT divergence)",
-                                    facts, rule_result, last_close, atr_val)
+    result = _llm_reason_directional("ICT Trader", "ICT (kill zones, OTE, liquidity, SMT divergence)",
+                                      facts, rule_result, last_close, atr_val)
+    if supporting_gap:
+        gap_type, gap_low, gap_high, _ = supporting_gap
+        result["fvg_boundary"] = round(gap_high if gap_type == "bullish" else gap_low, 5)
+    return result
 
 
 # ---------------------------------------------------------------------------

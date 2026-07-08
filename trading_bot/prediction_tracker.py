@@ -147,5 +147,70 @@ def increment_and_check_cycle(db_path: str, symbol: str, every_n: int = 4) -> in
     return count
 
 
+def get_top_combinations_all_sizes(db_path: str, symbol: str, sizes: tuple = (2, 3, 4, 5),
+                                    min_sample_size: int = 10, top_n: int = 3) -> dict:
+    """
+    Same idea as before, generalized to combination sizes 2 through 5 —
+    computed in a single pass over the reviewed history (not re-querying
+    the DB per size). Returns {size: [list of top combos]}, where each
+    combo is {"combo": (name1, name2, ...), "direction":..., "win_rate":...,
+    "sample_size":...}. A size with nothing clearing min_sample_size
+    returns [] for that size — that's expected, not an error, especially
+    for larger combo sizes (5 specific strategies agreeing together is
+    rarer than 2, so it naturally needs more history to qualify).
+    """
+    from collections import defaultdict
+    from itertools import combinations as _combinations
+
+    conn = _conn(db_path)
+    cur = conn.execute(
+        "SELECT timestamp, strategy, vote, was_correct FROM predictions WHERE symbol = ? AND reviewed = 1",
+        (symbol,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    cycles = defaultdict(list)
+    for timestamp, strategy, vote, was_correct in rows:
+        cycles[timestamp].append((strategy, vote, was_correct))
+
+    # combo_stats[size][(pair, direction)] = {"wins":.., "total":..}
+    combo_stats = {size: defaultdict(lambda: {"wins": 0, "total": 0}) for size in sizes}
+
+    for timestamp, entries in cycles.items():
+        by_direction = defaultdict(list)
+        for strategy, vote, was_correct in entries:
+            by_direction[vote].append((strategy, was_correct))
+
+        for direction, participants in by_direction.items():
+            names = sorted(p[0] for p in participants)
+            outcome = participants[0][1]  # shared outcome for this cycle/direction
+            for size in sizes:
+                if len(names) < size:
+                    continue
+                for combo in _combinations(names, size):
+                    key = (combo, direction)
+                    combo_stats[size][key]["total"] += 1
+                    combo_stats[size][key]["wins"] += int(outcome)
+
+    results = {}
+    for size in sizes:
+        size_results = []
+        for (combo, direction), stats in combo_stats[size].items():
+            if stats["total"] >= min_sample_size:
+                win_rate = round(stats["wins"] / stats["total"] * 100, 1)
+                size_results.append({"combo": combo, "direction": direction,
+                                      "win_rate": win_rate, "sample_size": stats["total"]})
+        size_results.sort(key=lambda r: (-r["win_rate"], -r["sample_size"]))
+        results[size] = size_results[:top_n]
+
+    return results
+
+
+def get_top_combinations(db_path: str, symbol: str, min_sample_size: int = 10, top_n: int = 3) -> list:
+    """Backward-compatible pairs-only version — kept for any existing callers."""
+    return get_top_combinations_all_sizes(db_path, symbol, sizes=(2,), min_sample_size=min_sample_size, top_n=top_n)[2]
+
+
 def get_all_strategy_accuracies(db_path: str, symbol: str, strategy_names: list) -> dict:
     return {name: get_accuracy(db_path, symbol, name) for name in strategy_names}

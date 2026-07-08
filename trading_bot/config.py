@@ -69,7 +69,12 @@ MIN_CONFIDENCE_TO_AUTO_EXECUTE = 80
 NEWS_BLACKOUT_MINUTES = 15      # no new trades within N minutes of high-impact news
 MAX_CONSECUTIVE_LOSSES = 3      # cooldown trigger for the guardrail
 MAX_TRADES_PER_DAY = 5          # hard overtrading cap, enforced in guardrail.py
-BLOCK_TRADES_IN_HIGH_VOLATILITY = True
+BLOCK_TRADES_IN_HIGH_VOLATILITY = False  # now handled by regime-switching (regime_engine.py) instead of a blanket block
+DEVILS_ADVOCATE_VETO_MIN_CONFIDENCE = 65   # only a CONFIDENT rejection hard-blocks a trade
+STRUCTURAL_LOCK_SIZE_REDUCTION = 0.25      # when H4 trend conflicts with M15 structure, trade at 25% of normal size (not fully blocked)
+SPREAD_MAX_PIPS = 3.0                       # halt execution if broker spread widens beyond this (protects against slippage)
+PRE_NEWS_RISK_REDUCTION_MINUTES = 30        # start reducing risk this many minutes before high-impact news
+PRE_NEWS_RISK_MULTIPLIER = 0.5              # risk-per-trade multiplier during the pre-news window
 
 # ---------------------------------------------------------------------------
 # News sentiment (Finnhub — free tier, needs a free API key)
