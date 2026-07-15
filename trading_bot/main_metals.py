@@ -24,6 +24,7 @@ import logging
 import time
 
 import ceo
+import chart_generator
 import config
 import config_metals as market
 import data_feed
@@ -38,6 +39,7 @@ import regime_engine
 import risk_manager
 import strategies
 import telegram_bot
+import vision_strategy
 from agents import devils_advocate_agent
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -121,6 +123,20 @@ def run_cycle_for_symbol(symbol: str):
 
     upcoming_events = news_calendar.get_upcoming_events_for_symbol(symbol)
     predictions = strategies.run_all(data, upcoming_events)
+
+    # --- Optional 10th strategy: Chart Vision. Only runs if VISION_MODEL is
+    # configured. Uses an UNMARKED chart (no entry/SL/TP overlay) so its
+    # read isn't anchored to our own system's proposed levels — it reads
+    # the raw price action independently, like the other 9 strategies do
+    # from numbers. Tracked in prediction_tracker exactly like the rest. ---
+    if vision_strategy.is_enabled():
+        try:
+            raw_chart_path = chart_generator.generate_chart(symbol, ltf, bars=60)
+            vision_result = vision_strategy.chart_vision(data, raw_chart_path)
+            predictions.append(vision_result)
+        except Exception as e:
+            log.warning("Chart Vision strategy failed this cycle, skipping: %s", e)
+
     prediction_tracker.save_predictions(PREDICTIONS_DB_PATH, symbol, predictions)
 
     sentiment = news_sentiment.get_symbol_sentiment(symbol)
@@ -178,9 +194,22 @@ def run_cycle_for_symbol(symbol: str):
 
     report_text = telegram_bot.format_full_report(
         symbol, reviews, predictions, final, guardrail_result, sentiment.get("headlines"),
-        top_combinations_by_size=prediction_tracker.get_top_combinations_all_sizes(PREDICTIONS_DB_PATH, symbol),
+        strategy_weights=dynamic_weights,
     )
     telegram_bot.send_long_alert(report_text, token=TG_TOKEN, chat_id=TG_CHAT)
+
+    # --- Screenshot: the same chart, now marked with the actual
+    # recommended entry/SL/TP for this cycle, sent as its own photo message
+    # (Telegram platform limit: photos can't be embedded in a text message). ---
+    try:
+        marked_chart_path = chart_generator.generate_chart(
+            symbol, ltf, entry=entry, sl=sl, tp=tp1, direction=final["consensus"], bars=60,
+        )
+        caption = f"{symbol} — CEO: {final['consensus']} ({final['confidence']}%)"
+        telegram_bot.send_photo(marked_chart_path, caption=caption, token=TG_TOKEN, chat_id=TG_CHAT)
+    except Exception as e:
+        log.warning("Chart screenshot generation/send failed this cycle: %s", e)
+
     log.info("%s: report sent — CEO %s (%s%%), guardrail %s",
               symbol, final["consensus"], final["confidence"], "ALLOWED" if guardrail_result["allowed"] else "BLOCKED")
 

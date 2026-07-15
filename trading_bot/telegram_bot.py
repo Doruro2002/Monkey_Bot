@@ -10,6 +10,8 @@ Setup:
 """
 
 import logging
+import os
+import time
 
 import requests
 
@@ -24,12 +26,16 @@ def _url(method: str, token: str) -> str:
     return f"{API_BASE.format(token=token)}/{method}"
 
 
-def send_message(text: str, reply_markup: dict = None, token: str = None, chat_id: str = None) -> dict:
+def send_message(text: str, reply_markup: dict = None, token: str = None, chat_id: str = None,
+                  max_retries: int = 3, _is_fallback: bool = False) -> dict:
     """
     token/chat_id are optional — if omitted, falls back to config.py's
-    single global bot (backward compatible with the original single-market
-    setup). Each market's main script should pass its OWN token/chat_id
-    explicitly so forex/metals/crypto each message a different bot.
+    single global bot. Retries transient network failures a few times with
+    short backoff. If Telegram rejects the message specifically because
+    the Markdown couldn't be parsed (very common with dynamic content like
+    news headlines that contain stray *, _, [ characters), automatically
+    retries ONE more time as plain text instead of giving up — a
+    formatting hiccup should never cost you the whole report.
     """
     token = token or config.TELEGRAM_BOT_TOKEN
     chat_id = chat_id or config.TELEGRAM_CHAT_ID
@@ -38,13 +44,40 @@ def send_message(text: str, reply_markup: dict = None, token: str = None, chat_i
         log.warning("Telegram not configured — printing instead:\n%s", text)
         return {}
 
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    payload = {"chat_id": chat_id, "text": text}
+    if not _is_fallback:
+        payload["parse_mode"] = "Markdown"
     if reply_markup:
         payload["reply_markup"] = reply_markup
 
-    resp = requests.post(_url("sendMessage", token), json=payload, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(_url("sendMessage", token), json=payload, timeout=15)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.HTTPError as e:
+            body = e.response.text if e.response is not None else ""
+            last_error = e
+            log.warning("Telegram send failed (attempt %d/%d): %s | response: %s", attempt, max_retries, e, body[:300])
+
+            # 400 + "can't parse entities" = Markdown formatting broke on
+            # dynamic content. Retrying the SAME payload won't help — fall
+            # back to plain text immediately instead of burning retries.
+            if e.response is not None and e.response.status_code == 400 and not _is_fallback:
+                log.warning("Retrying as plain text (Markdown parsing failed) instead of giving up.")
+                return send_message(text, reply_markup=reply_markup, token=token, chat_id=chat_id,
+                                     max_retries=1, _is_fallback=True)
+            if attempt < max_retries:
+                time.sleep(2 * attempt)
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            log.warning("Telegram send failed (attempt %d/%d): %s", attempt, max_retries, e)
+            if attempt < max_retries:
+                time.sleep(2 * attempt)
+
+    log.error("Telegram send failed after %d attempts, giving up this cycle: %s", max_retries, last_error)
+    return {}
 
 
 def format_predictions_report(symbol: str, predictions: list) -> str:
@@ -150,6 +183,47 @@ def send_trade_alert_with_confirmation(text: str, trade_id: str, token: str = No
     return send_message(text, reply_markup=keyboard, token=token, chat_id=chat_id)
 
 
+def send_photo(image_path: str, caption: str = "", token: str = None, chat_id: str = None,
+                max_retries: int = 2) -> dict:
+    """
+    Sends a chart image as its own Telegram message. Note: Telegram treats
+    photos as a separate message type from text (platform limitation, not
+    a choice here) — a photo's caption is capped at 1024 characters, so
+    this is meant to accompany the full text report, not replace it.
+    """
+    token = token or config.TELEGRAM_BOT_TOKEN
+    chat_id = chat_id or config.TELEGRAM_CHAT_ID
+
+    if not token or not chat_id:
+        log.warning("Telegram not configured — skipping chart send for %s", image_path)
+        return {}
+
+    if not os.path.exists(image_path):
+        log.warning("Chart file not found, skipping send: %s", image_path)
+        return {}
+
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            with open(image_path, "rb") as f:
+                resp = requests.post(
+                    _url("sendPhoto", token),
+                    data={"chat_id": chat_id, "caption": caption[:1024]},
+                    files={"photo": f},
+                    timeout=30,
+                )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            log.warning("Telegram photo send failed (attempt %d/%d): %s", attempt, max_retries, e)
+            if attempt < max_retries:
+                time.sleep(2 * attempt)
+
+    log.error("Telegram photo send failed after %d attempts: %s", max_retries, last_error)
+    return {}
+
+
 def send_plain_alert(text: str, token: str = None, chat_id: str = None):
     return send_message(text, token=token, chat_id=chat_id)
 
@@ -247,7 +321,7 @@ def format_learning_report(symbol: str, accuracies: dict, market_lean: str, llm_
 
 def format_full_report(symbol: str, reviews: list, predictions: list, ceo_summary: dict,
                         guardrail_result: dict = None, sentiment_headlines: list = None,
-                        top_combinations_by_size: dict = None) -> str:
+                        strategy_weights: dict = None) -> str:
     """
     ONE message, built for fast scanning:
       1. Quick summary + recommended action (read this, done if you're busy)
@@ -298,6 +372,34 @@ def format_full_report(symbol: str, reviews: list, predictions: list, ceo_summar
 
     lines.append(format_trading_advisor_line(predictions, ceo_summary))
 
+    # --- Strategy Spotlight: WHICH strategy is actually most USEFUL right
+    # now — combining learned trust (weight) with actual current conviction
+    # (its own confidence this cycle). Weight alone isn't enough: a regime
+    # boost can raise a strategy's weight even in a cycle where it has no
+    # real signal (e.g. RangeTrading gets boosted in low volatility even
+    # when the market isn't actually ranging). Multiplying by its own
+    # reported confidence prevents a "trusted but currently blank"
+    # strategy from getting spotlighted over one that's both trusted AND
+    # actually has something to say right now. ---
+    if strategy_weights:
+        scored = []
+        for p in predictions:
+            w = strategy_weights.get(p["name"], 0)
+            combined_score = w * (p["confidence"] / 100)
+            scored.append((combined_score, p))
+        scored.sort(key=lambda x: -x[0])
+        top_score, top_pred = scored[0] if scored else (0, None)
+
+        if top_pred:
+            lines.append("\n*── 🔦 Strategy Spotlight ──*")
+            lines.append(f"Most useful right now: *{top_pred['name']}* "
+                         f"(trust weight {round(strategy_weights.get(top_pred['name'],0)*100)}%, "
+                         f"its own confidence {top_pred['confidence']}% this cycle)")
+            lines.append(f"Its call: {top_pred['vote']} ({top_pred['confidence']}%) — {top_pred.get('strategy', '')}")
+            if top_pred.get("reasons"):
+                reason_text = " ".join(top_pred["reasons"]) if isinstance(top_pred["reasons"], list) else str(top_pred["reasons"])
+                lines.append(f"Why: _{reason_text}_")
+
     # --- TABLE: every strategy at a glance ---
     lines.append("\n*── Strategy Table ──*")
     table_rows = ["Strategy      Vote Conf  Entry     SL        TP1"]
@@ -311,27 +413,6 @@ def format_full_report(symbol: str, reviews: list, predictions: list, ceo_summar
         tp1 = _pad(r["tp1"], 9)
         table_rows.append(f"{name} {vote} {conf} {entry} {sl} {tp1}")
     lines.append("```\n" + "\n".join(table_rows) + "\n```")
-
-    # --- Top combinations, built from REAL tracked history, not a one-off report ---
-    lines.append("*── Top Combinations (tracked) ──*")
-    size_labels = {2: "Pairs", 3: "Triplets", 4: "Quads", 5: "Quintuplets"}
-    if top_combinations_by_size:
-        any_shown = False
-        for size in sorted(top_combinations_by_size.keys()):
-            combos = top_combinations_by_size[size]
-            label = size_labels.get(size, f"{size}-combos")
-            if combos:
-                any_shown = True
-                lines.append(f"   _{label}:_")
-                for c in combos:
-                    names_joined = " + ".join(c["combo"])
-                    lines.append(f"     {names_joined} → {c['direction']}: *{c['win_rate']}%* ({c['sample_size']} agreed-cycles)")
-            else:
-                lines.append(f"   _{label}:_ still building history")
-        if not any_shown:
-            lines.append("   Still building history — need more reviewed cycles before any combination clears the minimum sample size.")
-    else:
-        lines.append("   Still building history — need more reviewed cycles before any combination clears the minimum sample size.")
 
     # --- Real news headlines ---
     if sentiment_headlines:

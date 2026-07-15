@@ -212,5 +212,44 @@ def get_top_combinations(db_path: str, symbol: str, min_sample_size: int = 10, t
     return get_top_combinations_all_sizes(db_path, symbol, sizes=(2,), min_sample_size=min_sample_size, top_n=top_n)[2]
 
 
+def get_recency_weighted_accuracy(db_path: str, symbol: str, strategy: str,
+                                   recent_n: int = 10, full_lookback: int = 50) -> dict:
+    """
+    Real (not injected) recency signal: compares a strategy's accuracy over
+    its most recent N reviewed calls against its longer-run accuracy. If a
+    strategy has been cooling off lately, `recent_loss_rate` reflects that
+    numerically — computed entirely from actual stored outcomes, nothing
+    assumed or hand-set.
+    """
+    conn = _conn(db_path)
+    cur = conn.execute(
+        """SELECT was_correct FROM predictions
+           WHERE symbol = ? AND strategy = ? AND reviewed = 1
+           ORDER BY id DESC LIMIT ?""",
+        (symbol, strategy, full_lookback),
+    )
+    rows = [r[0] for r in cur.fetchall()]
+    conn.close()
+
+    if not rows:
+        return {"overall_accuracy": None, "recent_accuracy": None, "recent_loss_rate": 0.0, "sample_size": 0}
+
+    overall_accuracy = round(sum(rows) / len(rows) * 100, 1)
+
+    recent_rows = rows[:recent_n]  # already DESC (most recent first)
+    if recent_rows:
+        recent_accuracy = round(sum(recent_rows) / len(recent_rows) * 100, 1)
+        recent_loss_rate = round(1 - (sum(recent_rows) / len(recent_rows)), 3)
+    else:
+        recent_accuracy, recent_loss_rate = overall_accuracy, round(1 - sum(rows)/len(rows), 3)
+
+    return {
+        "overall_accuracy": overall_accuracy,
+        "recent_accuracy": recent_accuracy,
+        "recent_loss_rate": recent_loss_rate,
+        "sample_size": len(rows),
+    }
+
+
 def get_all_strategy_accuracies(db_path: str, symbol: str, strategy_names: list) -> dict:
     return {name: get_accuracy(db_path, symbol, name) for name in strategy_names}

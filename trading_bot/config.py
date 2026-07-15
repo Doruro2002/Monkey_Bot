@@ -40,6 +40,7 @@ CRYPTO_POLL_INTERVAL_SECONDS = 900   # 15 min, matches entry timeframe
 LLM_BACKEND = os.getenv("LLM_BACKEND", "none")  # "none" | "ollama" | "openrouter"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+VISION_MODEL = os.getenv("VISION_MODEL", "")  # e.g. "llava:7b" or "qwen2.5vl:7b" — optional, off by default. Requires Ollama.
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
 
@@ -64,7 +65,12 @@ RISK_PER_TRADE_PCT = 0.5        # % of account equity risked per trade
 MAX_DAILY_LOSS_PCT = 2.0        # stop trading for the day past this
 MAX_OPEN_TRADES = 2
 MIN_RR_RATIO = 2.0              # reject trades below this reward:risk
-MIN_CONFIDENCE_TO_ALERT = 65    # % - below this, don't even notify
+MIN_CONFIDENCE_TO_ALERT = 55    # % - lowered from 65 on request. TRADEOFF: you'll see
+                                 # "Consider" instead of WAIT more often, but each one is
+                                 # statistically weaker on average than a 65%+ call would be.
+                                 # This does not create more real edge — it shows you more
+                                 # of the moderate-confidence calls that were already being
+                                 # computed but previously hidden behind WAIT.
 MIN_CONFIDENCE_TO_AUTO_EXECUTE = 80
 NEWS_BLACKOUT_MINUTES = 15      # no new trades within N minutes of high-impact news
 MAX_CONSECUTIVE_LOSSES = 3      # cooldown trigger for the guardrail

@@ -16,20 +16,18 @@ DEFAULT_WEIGHTS = {
 }
 
 
-def get_dynamic_weights(db_path: str, symbol: str, strategy_names: list, min_samples: int = 10) -> Dict[str, float]:
+def get_dynamic_weights(db_path: str, symbol: str, strategy_names: list, min_samples: int = 10,
+                         recency_penalty_strength: float = 0.4) -> Dict[str, float]:
     """
-    THIS is the "learn from bad trades" loop made concrete: each strategy's
-    influence on the final decision is scaled by its own tracked accuracy
-    for THIS symbol in THIS market's own database (db_path) — a strategy
-    that's been wrong more often on this symbol genuinely gets less say
-    over time. Strategies without enough history yet fall back to
-    regime_engine.TIER_PRIORS (an informed cold-start default — SMC/ICT
-    trusted slightly more early on, since order-flow models are generally
-    considered higher-fidelity than lagging trend indicators) — NOT a
-    claim that this is proven, just a reasonable starting point until real
-    tracked data takes over completely.
+    Base weight = tracked overall accuracy (or tier prior if too little
+    history). On top of that, a REAL recency penalty: if a strategy's last
+    10 calls did worse than its longer-run average, its weight is reduced
+    proportionally to how much worse — computed entirely from
+    prediction_tracker's stored outcomes. This is the honest version of
+    "adaptive weighting": no injected/assumed conviction score, just actual
+    recent performance compared to actual longer-run performance.
     """
-    import prediction_tracker  # local import avoids a circular import at module load time
+    import prediction_tracker
     import regime_engine
 
     weights = {}
@@ -37,8 +35,17 @@ def get_dynamic_weights(db_path: str, symbol: str, strategy_names: list, min_sam
         acc = prediction_tracker.get_accuracy(db_path, symbol, name)
         if acc["sample_size"] < min_samples or acc["accuracy"] is None:
             weights[name] = regime_engine.TIER_PRIORS.get(name, 0.10)
-        else:
-            weights[name] = round(0.05 + (acc["accuracy"] / 100) * 0.3, 3)
+            continue
+
+        base_weight = 0.05 + (acc["accuracy"] / 100) * 0.3
+
+        recency = prediction_tracker.get_recency_weighted_accuracy(db_path, symbol, name)
+        if recency["sample_size"] >= min_samples and recency["recent_accuracy"] is not None:
+            # recent worse than overall -> real penalty; recent BETTER than overall -> real (small) boost
+            drift = (recency["recent_accuracy"] - recency["overall_accuracy"]) / 100  # e.g. -0.15 if recent is 15pts worse
+            base_weight *= max(0.2, 1 + recency_penalty_strength * drift)  # floor at 0.2x so one bad streak can't zero it out
+
+        weights[name] = round(base_weight, 3)
 
     total = sum(weights.values()) or 1
     return {k: round(v / total, 3) for k, v in weights.items()}
@@ -110,6 +117,22 @@ def decide(agent_results: List[dict], weights: Dict[str, float] = None,
 
     buy_pct = round((buy_score / total_weight) * 100)
     sell_pct = round((sell_score / total_weight) * 100)
+
+    # Strong-alignment boost (the honest version of "primacy selection"):
+    # if 4+ directional strategies genuinely agree on the same side, that's
+    # real information beyond the weighted average alone — nudge confidence
+    # up to reflect it. This does NOT force a trade when alignment is
+    # absent; WAIT stays the correct output when the bar isn't cleared.
+    directional = [r for r in agent_results if r["vote"] in ("BUY", "SELL") and r["name"] not in NON_DIRECTIONAL_AGENTS]
+    buy_agree = sum(1 for r in directional if r["vote"] == "BUY")
+    sell_agree = sum(1 for r in directional if r["vote"] == "SELL")
+
+    if buy_pct > sell_pct and buy_agree >= 4:
+        buy_pct = min(99, buy_pct + (buy_agree - 3) * 3)  # small, capped nudge per extra agreeing strategy
+        all_reasons.append(f"Strong alignment: {buy_agree}/{len(directional)} strategies agree BUY")
+    if sell_pct > buy_pct and sell_agree >= 4:
+        sell_pct = min(99, sell_pct + (sell_agree - 3) * 3)
+        all_reasons.append(f"Strong alignment: {sell_agree}/{len(directional)} strategies agree SELL")
 
     if buy_pct > sell_pct and buy_pct >= 50:
         return {"consensus": "BUY", "confidence": buy_pct, "reasons": all_reasons}

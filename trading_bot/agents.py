@@ -82,10 +82,14 @@ def _llm_reason_directional(persona: str, strategy: str, facts: list, rule_based
         f"Base your reasoning STRICTLY on the technical facts below — these come from real "
         f"live market data computed moments ago. Do NOT invent, recall, or assume any price, "
         f"indicator value, or event not explicitly listed here:\n{facts_text}\n\n"
-        f"You must commit to a side — BUY or SELL, never 'wait' or 'neutral'. "
-        f"If the evidence is weak or mixed, still pick whichever side has more support, "
-        f"and reflect that weakness with a LOW confidence score (e.g. 25-40) rather than "
-        f"refusing to choose. Respond ONLY with JSON, no other text, no disclaimers:\n"
+        f"If the evidence points in different directions, explicitly weigh which piece is more "
+        f"reliable right now and why — but if the conflict is genuinely unresolved, say so and "
+        f"reflect that with a LOW confidence score. A well-reasoned 'evidence is mixed, 35% "
+        f"confidence' is a correct, valuable answer, not a failure — do not manufacture false "
+        f"resolution to a conflict that isn't actually resolved by the facts given. "
+        f"You must still commit to a side — BUY or SELL, never 'wait' or 'neutral' — but the "
+        f"confidence number is what actually communicates how resolved the conflict is. "
+        f"Respond ONLY with JSON, no other text, no disclaimers:\n"
         f'{{"vote": "BUY" | "SELL", "confidence": 0-100, "reasoning": "one or two sentences"}}'
     )
     system = (

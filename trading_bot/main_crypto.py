@@ -10,6 +10,7 @@ import logging
 import time
 
 import ceo
+import chart_generator
 import config
 import config_crypto as market
 import crypto_data_feed
@@ -20,6 +21,7 @@ import news_sentiment
 import prediction_tracker
 import strategies
 import telegram_bot
+import vision_strategy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("main_crypto")
@@ -75,6 +77,15 @@ def run_cycle_for_symbol(symbol: str):
 
     # No forex-style economic calendar filter for crypto — pass empty list.
     predictions = strategies.run_all(data, upcoming_events=[])
+
+    if vision_strategy.is_enabled():
+        try:
+            raw_chart_path = chart_generator.generate_chart(symbol, ltf, bars=60)
+            vision_result = vision_strategy.chart_vision(data, raw_chart_path)
+            predictions.append(vision_result)
+        except Exception as e:
+            log.warning("Chart Vision strategy failed this cycle, skipping: %s", e)
+
     prediction_tracker.save_predictions(PREDICTIONS_DB_PATH, symbol, predictions)
 
     sentiment = news_sentiment.get_symbol_sentiment(symbol)
@@ -101,9 +112,19 @@ def run_cycle_for_symbol(symbol: str):
 
     report_text = telegram_bot.format_full_report(
         symbol, reviews, predictions, final, guardrail_result, sentiment.get("headlines"),
-        top_combinations_by_size=prediction_tracker.get_top_combinations_all_sizes(PREDICTIONS_DB_PATH, symbol),
+        strategy_weights=dynamic_weights,
     )
     telegram_bot.send_long_alert(report_text, token=TG_TOKEN, chat_id=TG_CHAT)
+
+    try:
+        marked_chart_path = chart_generator.generate_chart(
+            symbol, ltf, entry=entry, sl=sl, tp=tp1, direction=final["consensus"], bars=60,
+        )
+        caption = f"{symbol} — CEO: {final['consensus']} ({final['confidence']}%)"
+        telegram_bot.send_photo(marked_chart_path, caption=caption, token=TG_TOKEN, chat_id=TG_CHAT)
+    except Exception as e:
+        log.warning("Chart screenshot generation/send failed this cycle: %s", e)
+
     log.info("%s: report sent — CEO %s (%s%%), guardrail %s",
               symbol, final["consensus"], final["confidence"], "ALLOWED" if guardrail_result["allowed"] else "BLOCKED")
 

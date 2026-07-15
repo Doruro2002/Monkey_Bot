@@ -58,6 +58,48 @@ def ask(prompt: str, system: str = "") -> str:
     return ""
 
 
+def ask_vision(prompt: str, image_path: str, system: str = "") -> str:
+    """
+    Sends a prompt PLUS an actual chart image to a vision-capable Ollama
+    model (e.g. llava, qwen2.5vl). Requires VISION_MODEL to be set in
+    config — this is a separate, optional model from your regular
+    LLM_BACKEND text model, since most small local models can't read
+    images at all. Fails safe (empty string) if not configured or the
+    call fails — callers should have a non-vision fallback.
+    """
+    if not config.VISION_MODEL:
+        return ""
+    if config.LLM_BACKEND != "ollama":
+        log.warning("Vision analysis currently only supports the Ollama backend.")
+        return ""
+
+    import base64
+    try:
+        with open(image_path, "rb") as f:
+            image_b64 = base64.b64encode(f.read()).decode("utf-8")
+    except Exception as e:
+        log.warning("Could not read chart image for vision analysis: %s", e)
+        return ""
+
+    try:
+        resp = requests.post(
+            config.OLLAMA_URL,
+            json={
+                "model": config.VISION_MODEL,
+                "prompt": prompt,
+                "system": system,
+                "images": [image_b64],
+                "stream": False,
+            },
+            timeout=120,  # vision models are typically slower than text-only
+        )
+        resp.raise_for_status()
+        return resp.json().get("response", "")
+    except Exception as e:
+        log.warning("Vision analysis call failed: %s", e)
+        return ""
+
+
 def ask_json(prompt: str, system: str = "") -> dict:
     """Asks the LLM to respond in JSON only, and safely parses it."""
     raw = ask(prompt, system)

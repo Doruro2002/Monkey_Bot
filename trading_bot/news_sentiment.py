@@ -19,6 +19,7 @@ applied to news too, not just price levels.
 """
 
 import logging
+import time
 from datetime import datetime, timedelta
 
 import requests
@@ -37,24 +38,27 @@ def get_general_news(category: str = "forex", limit: int = 10) -> list:
                      "Free signup: https://finnhub.io/register")
         return []
 
-    def _try(cat):
-        try:
-            resp = requests.get(
-                f"{BASE_URL}/news",
-                params={"category": cat, "token": config.FINNHUB_API_KEY},
-                timeout=15,
-            )
-            log.info("Finnhub /news category=%s -> HTTP %s", cat, resp.status_code)
-            if resp.status_code != 200:
-                log.warning("Finnhub returned non-200: %s | body: %s", resp.status_code, resp.text[:300])
-                return []
-            resp.raise_for_status()
-            articles = resp.json()
-            log.info("Finnhub category=%s returned %d articles", cat, len(articles) if isinstance(articles, list) else 0)
-            return articles if isinstance(articles, list) else []
-        except Exception as e:
-            log.warning("Finnhub news fetch failed for category=%s: %s", cat, e)
-            return []
+    def _try(cat, retries: int = 2):
+        for attempt in range(1, retries + 1):
+            try:
+                resp = requests.get(
+                    f"{BASE_URL}/news",
+                    params={"category": cat, "token": config.FINNHUB_API_KEY},
+                    timeout=15,
+                )
+                log.info("Finnhub /news category=%s -> HTTP %s", cat, resp.status_code)
+                if resp.status_code != 200:
+                    log.warning("Finnhub returned non-200: %s | body: %s", resp.status_code, resp.text[:300])
+                    return []
+                resp.raise_for_status()
+                articles = resp.json()
+                log.info("Finnhub category=%s returned %d articles", cat, len(articles) if isinstance(articles, list) else 0)
+                return articles if isinstance(articles, list) else []
+            except Exception as e:
+                log.warning("Finnhub news fetch failed for category=%s (attempt %d/%d): %s", cat, attempt, retries, e)
+                if attempt < retries:
+                    time.sleep(2)
+        return []
 
     articles = _try(category)
     if not articles and category != "general":
